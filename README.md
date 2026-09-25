@@ -9,11 +9,23 @@ una **Supabase Edge Function** como API en lugar de n8n.
 appypf.giwa-ia.com  →  GitHub Pages (este index.html)
                            ↓ POST text/plain {"k": <clave>, "dias": 7}
                       Edge Function ypf-panel (proyecto ofhiogczijhzkuqdjwvz)
-                           ↓ service_role, solo lectura
+                           ↓ Postgres como ypf_panel_ro (solo SELECT sobre ypf, sesión read-only)
                       schema ypf (contactos, mensajes, simulaciones, oportunidades, …)
 ```
 
 El código de la función vive en `../YPF LUZ/supabase/functions/ypf-panel/index.ts`.
+
+## Acceso a la base
+
+La función **no usa la service_role**. Se conecta como `ypf_panel_ro`, un rol que:
+
+- solo tiene `SELECT` sobre el schema `ypf` (y una política RLS de lectura en las 11
+  tablas que usa el panel; `kb_chunks` queda afuera);
+- tiene la sesión en `read-only` y `statement_timeout` de 15 s;
+- no puede leer `public`, `auth`, `grun` ni otros schemas, ni ejecutar las `ypf_*`.
+
+Verificado el 24/09/2026 con pruebas reales desde la función. Receta y cómo rotar la
+contraseña: `../YPF LUZ/supabase/sql/rol-ypf-panel-ro.sql`.
 
 ## La clave
 
@@ -25,16 +37,22 @@ ningún secreto: es HTML público.
 Por defecto la clave queda en `sessionStorage`; con "Recordarme", en
 `localStorage`.
 
-Para cambiarla: Supabase → Edge Functions → Secrets → `PANEL_CLAVE`.
+La clave **no se guarda en ningún archivo** (ni en el Drive ni en el repo): vive
+solo en el secret `PANEL_CLAVE` de la función. Rotada el 24/09/2026.
+
+Para cambiarla: `supabase secrets set PANEL_CLAVE=<nueva> --project-ref ofhiogczijhzkuqdjwvz`
+(o Supabase → Edge Functions → Secrets). Toma efecto al instante: quien tenga la
+anterior guardada queda afuera al próximo refresco.
 
 ## CORS
 
 La función solo devuelve `Access-Control-Allow-Origin` a
-`https://appypf.giwa-ia.com` y `http://localhost:8080` (constante `ORIGENES`).
-POST `text/plain` sin headers propios no dispara preflight: si se agrega un
-header al `fetch`, hay que revisar el `OPTIONS` de la función.
+`https://appypf.giwa-ia.com` (constante `ORIGENES`). POST `text/plain` sin
+headers propios no dispara preflight: si se agrega un header al `fetch`, hay
+que revisar el `OPTIONS` de la función.
 
-Probar en local:
+Probar en local: sumar **temporalmente** `http://localhost:8080` a `ORIGENES`,
+deployar, y sacarlo al terminar.
 
 ```bash
 python3 -m http.server 8080 --directory .
@@ -44,15 +62,15 @@ python3 -m http.server 8080 --directory .
 
 - **Front:** `git push` a `main` → GitHub Pages. Custom domain por el archivo
   `CNAME`; DNS en Squarespace: `CNAME appypf → sechavarria-star.github.io`.
-- **Función:** Management API con un token personal (`SUPABASE_ACCESS_TOKEN` en
-  `../YPF LUZ/.env`, nunca en el repo):
+- **Función:** con la CLI de Supabase (sesión de `supabase login`), desde `../YPF LUZ`:
 
 ```bash
-curl -X POST "https://api.supabase.com/v1/projects/ofhiogczijhzkuqdjwvz/functions/deploy?slug=ypf-panel" \
-  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
-  -F 'metadata={"entrypoint_path":"index.ts","name":"ypf-panel","verify_jwt":false};type=application/json' \
-  -F "file=@supabase/functions/ypf-panel/index.ts;filename=index.ts;type=application/typescript"
+supabase functions deploy ypf-panel --project-ref ofhiogczijhzkuqdjwvz --no-verify-jwt --use-api
 ```
+
+Secrets de la función: `PANEL_CLAVE` (la clave del panel) y `YPF_PANEL_DB_PASSWORD`
+(contraseña de `ypf_panel_ro`). Host y puerto los toma de `SUPABASE_DB_URL`, que
+inyecta Supabase.
 
 `verify_jwt` va apagado a propósito: no hay anon key en el HTML, la clave del
 panel es la única puerta.
